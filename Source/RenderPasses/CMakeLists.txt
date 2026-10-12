@@ -27,3 +27,6 @@ add_subdirectory(ToneMapper)
 add_subdirectory(Utils)
 add_subdirectory(WARDiffPathTracer)
 add_subdirectory(WhittedRayTracer)
+
+add_subdirectory(RasterGBuffer)
+add_subdirectory(GeometryDebugPass)
