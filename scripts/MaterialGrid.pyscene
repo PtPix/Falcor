@@ -1,0 +1,72 @@
+# Material validation scene for RasterGBuffer.
+#
+# Layout:
+#   - 5x5 sphere grid: roughness along X, metalness along Y.
+#   - Two instances sharing one mesh and material (same MaterialId,
+#     different InstanceId).
+#   - One emissive cube with raw linear emission (2.0, 1.0, 0.4).
+
+roughnessValues = [0.05, 0.25, 0.5, 0.75, 1.0]
+metalnessValues = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+for row, metalness in enumerate(metalnessValues):
+    for column, roughness in enumerate(roughnessValues):
+        name = "Sphere_r{}_m{}".format(column, row)
+
+        material = StandardMaterial(name=name, model=ShadingModel.MetalRough)
+        material.baseColor = float4(0.8, 0.2, 0.1, 1.0)
+        material.roughness = roughness
+        material.metallic = metalness
+        material.emissiveColor = float3(0.0)
+        material.emissiveFactor = 1.0
+
+        sphere = TriangleMesh.createSphere(radius=0.42, segmentsU=32, segmentsV=32)
+        sphere.name = name
+        meshID = sceneBuilder.addTriangleMesh(sphere, material)
+
+        position = float3((column - 2) * 1.2, (2 - row) * 1.2, 0.0)
+        nodeID = sceneBuilder.addNode(name, Transform(translation=position))
+        sceneBuilder.addMeshInstance(meshID=meshID, nodeID=nodeID)
+
+
+# Shared mesh and material, two instances.
+sharedMaterial = StandardMaterial(name="SharedMaterial", model=ShadingModel.MetalRough)
+sharedMaterial.baseColor = float4(0.1, 0.6, 0.2, 1.0)
+sharedMaterial.roughness = 0.5
+sharedMaterial.metallic = 0.0
+sharedMaterial.emissiveColor = float3(0.0)
+sharedMaterial.emissiveFactor = 1.0
+
+sharedSphere = TriangleMesh.createSphere(radius=0.42, segmentsU=32, segmentsV=32)
+sharedSphere.name = "SharedSphere"
+sharedMeshID = sceneBuilder.addTriangleMesh(sharedSphere, sharedMaterial)
+
+for index, x in enumerate([-1.2, 0.0]):
+    name = "SharedInstance{}".format(index)
+    nodeID = sceneBuilder.addNode(name, Transform(translation=float3(x, -3.6, 0.0)))
+    sceneBuilder.addMeshInstance(meshID=sharedMeshID, nodeID=nodeID)
+
+
+# Emissive cube. Standard material emits only on the front-facing side.
+emissiveMaterial = StandardMaterial(name="EmissiveMaterial", model=ShadingModel.MetalRough)
+emissiveMaterial.baseColor = float4(0.2, 0.2, 0.2, 1.0)
+emissiveMaterial.roughness = 0.5
+emissiveMaterial.metallic = 0.0
+emissiveMaterial.emissiveColor = float3(0.5, 0.25, 0.1)
+emissiveMaterial.emissiveFactor = 4.0
+
+emissiveMesh = TriangleMesh.createCube(float3(0.8))
+emissiveMesh.name = "EmissiveCube"
+emissiveMeshID = sceneBuilder.addTriangleMesh(emissiveMesh, emissiveMaterial)
+emissiveNodeID = sceneBuilder.addNode("EmissiveCube", Transform(translation=float3(1.2, -3.6, 0.0)))
+sceneBuilder.addMeshInstance(meshID=emissiveMeshID, nodeID=emissiveNodeID)
+
+
+camera = Camera("MaterialCamera")
+camera.position = float3(0.0, -0.6, 12.0)
+camera.target = float3(0.0, -0.6, 0.0)
+camera.up = float3(0.0, 1.0, 0.0)
+camera.nearPlane = 0.1
+camera.farPlane = 100.0
+camera.focalLength = 35.0
+sceneBuilder.addCamera(camera)

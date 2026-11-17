@@ -1,14 +1,24 @@
 #include "RasterGBuffer.h"
+#include "RenderGraph/RenderPassHelpers.h"
 
 namespace
 {
-    const std::string kDepthShader = "RenderPasses/RasterGBuffer/Depth.slang";
-    const std::string kGBufferShader = "RenderPasses/RasterGBuffer/RasterGBuffer.slang";
+const std::string kDepthShader = "RenderPasses/RasterGBuffer/Depth.slang";
+const std::string kGBufferShader = "RenderPasses/RasterGBuffer/RasterGBuffer.slang";
 
-    constexpr uint32_t kPositionTarget = 0;
-    constexpr uint32_t kNormalTarget = 1;
-    constexpr uint32_t kTexCoordTarget = 2;
-}
+const std::string kDepthName = "Depth";
+const std::string kIdsName = "Ids";
+
+// Engine-style color targets. Attachment index == SV_Target index == list order.
+const ChannelList kGBufferChannels = {
+    {"GBuffer0", "gBaseColorAO", "Base color (linear) and AO",                   false, ResourceFormat::RGBA8UnormSrgb},
+    {"GBuffer1", "gMaterial",    "Metallic, roughness, specular, shading model", false, ResourceFormat::RGBA8Unorm},
+    {"GBuffer2", "gNormalW",     "World-space shading normal",                   false, ResourceFormat::RGBA16Float},
+    {"GBuffer3", "gEmissive",    "Linear emissive color",                        false, ResourceFormat::RGBA16Float},
+};
+
+constexpr uint32_t kInvalidId = 0xffffffffu;
+} // namespace
 
 extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registry)
 {
@@ -17,49 +27,43 @@ extern "C" FALCOR_API_EXPORT void registerPlugin(Falcor::PluginRegistry& registr
 
 RasterGBuffer::RasterGBuffer(ref<Device> pDevice, const Properties& props) : RenderPass(pDevice)
 {
-    mpDepthFbo = Fbo::create(mpDevice);
     mpGBufferFbo = Fbo::create(mpDevice);
 
     mDepthPass.pState = GraphicsState::create(mpDevice);
     mGBufferPass.pState = GraphicsState::create(mpDevice);
 
-    DepthStencilState::Desc DepthDesc;
-    DepthDesc.setDepthEnabled(true).setDepthFunc(ComparisonFunc::Less).setDepthWriteMask(true);
-    mDepthPass.pState->setDepthStencilState(DepthStencilState::create(DepthDesc));
+    DepthStencilState::Desc depthDesc;
+    depthDesc.setDepthEnabled(true).setDepthFunc(ComparisonFunc::Less).setDepthWriteMask(true);
+    mDepthPass.pState->setDepthStencilState(DepthStencilState::create(depthDesc));
 
-    DepthStencilState::Desc GbufferDepthDesc;
-    GbufferDepthDesc.setDepthEnabled(true).setDepthFunc(ComparisonFunc::Equal).setDepthWriteMask(false);
-    mGBufferPass.pState->setDepthStencilState(DepthStencilState::create(GbufferDepthDesc));
+    DepthStencilState::Desc gbufferDepthDesc;
+    gbufferDepthDesc.setDepthEnabled(true).setDepthFunc(ComparisonFunc::Equal).setDepthWriteMask(false);
+    mGBufferPass.pState->setDepthStencilState(DepthStencilState::create(gbufferDepthDesc));
 
-    BlendState::Desc BlendDesc;
-    mGBufferPass.pState->setBlendState(BlendState::create(BlendDesc));
+    BlendState::Desc blendDesc;
+    mGBufferPass.pState->setBlendState(BlendState::create(blendDesc));
 }
 
 RenderPassReflection RasterGBuffer::reflect(const CompileData& compileData)
 {
-    RenderPassReflection Reflector;
+    RenderPassReflection reflector;
 
-    Reflector.addOutput("depth", "Forward-Z device depth")
+    reflector.addOutput(kDepthName, "Forward-Z device depth")
         .texture2D()
         .format(ResourceFormat::D32Float)
         .bindFlags(ResourceBindFlags::DepthStencil | ResourceBindFlags::ShaderResource);
 
-    Reflector.addOutput("posW", "World position; alpha is surface validity")
-        .texture2D()
-        .format(ResourceFormat::RGBA32Float)
-        .bindFlags(ResourceBindFlags::RenderTarget | ResourceBindFlags::ShaderResource);
+    addRenderPassOutputs(reflector, kGBufferChannels, ResourceBindFlags::RenderTarget);
 
-    Reflector.addOutput("normW", "World-space interpolated vertex normal")
+    reflector.addOutput(kIdsName, "Runtime instance ID and material ID")
         .texture2D()
-        .format(ResourceFormat::RGBA32Float)
-        .bindFlags(ResourceBindFlags::RenderTarget | ResourceBindFlags::ShaderResource);
+        .format(ResourceFormat::RG32Uint)
+        .bindFlags(
+            ResourceBindFlags::RenderTarget |
+            ResourceBindFlags::ShaderResource |
+            ResourceBindFlags::UnorderedAccess);
 
-    Reflector.addOutput("texC", "Texture coordinates")
-        .texture2D()
-        .format(ResourceFormat::RG32Float)
-        .bindFlags(ResourceBindFlags::RenderTarget | ResourceBindFlags::ShaderResource);
-
-    return Reflector;
+    return reflector;
 }
 
 void RasterGBuffer::setScene(RenderContext* pRenderContext, const ref<Scene>& pScene)
@@ -90,40 +94,45 @@ void RasterGBuffer::createProgram(RasterPipeline& pipeline, const std::string& s
 
 void RasterGBuffer::execute(RenderContext* pRenderContext, const RenderData& renderData)
 {
-    const auto pDepth = renderData.getTexture("depth");
-    const auto pPosition = renderData.getTexture("posW");
-    const auto pNormal = renderData.getTexture("normW");
-    const auto pTexCoord = renderData.getTexture("texC");
+    const auto pDepth = renderData.getTexture(kDepthName);
+    const auto pIds = renderData.getTexture(kIdsName);
+    FALCOR_CHECK(pDepth && pIds, "RasterGBuffer: Required output texture is missing.");
 
-    FALCOR_CHECK(pDepth && pPosition && pNormal && pTexCoord,
-        "RasterGBuffer: Required output texture is missing.");
-
-    const uint32_t width = pDepth->getWidth();
-    const uint32_t height = pDepth->getHeight();
-
-    for (const auto& pTexture : {pPosition, pNormal, pTexCoord})
-    {
-        FALCOR_CHECK(
-            pTexture->getWidth() == width && pTexture->getHeight() == height,
-            "RasterGBuffer: Output texture dimensions must match.");
-    }
-
-    mpDepthFbo->attachDepthStencilTarget(pDepth);
+    const uint2 dim = {pDepth->getWidth(), pDepth->getHeight()};
 
     mpGBufferFbo->attachDepthStencilTarget(pDepth);
-    mpGBufferFbo->attachColorTarget(pPosition, kPositionTarget);
-    mpGBufferFbo->attachColorTarget(pNormal, kNormalTarget);
-    mpGBufferFbo->attachColorTarget(pTexCoord, kTexCoordTarget);
+
+    uint32_t targetIndex = 0;
+    for (const auto& channel : kGBufferChannels)
+    {
+        const auto pTexture = renderData.getTexture(channel.name);
+        FALCOR_CHECK(pTexture, "RasterGBuffer: Missing output '{}'.", channel.name);
+        FALCOR_CHECK(
+            pTexture->getWidth() == dim.x && pTexture->getHeight() == dim.y,
+            "RasterGBuffer: Output '{}' has mismatching dimensions.", channel.name);
+        mpGBufferFbo->attachColorTarget(pTexture, targetIndex++);
+    }
+
+    FALCOR_CHECK(
+        pIds->getWidth() == dim.x && pIds->getHeight() == dim.y,
+        "RasterGBuffer: '{}' has mismatching dimensions.", kIdsName);
+    mpGBufferFbo->attachColorTarget(pIds, targetIndex);
 
     pRenderContext->clearDsv(pDepth->getDSV().get(), 1.0f, 0);
-    pRenderContext->clearFbo(mpGBufferFbo.get(), float4(0.0f), 1.0f, 0, FboAttachmentType::Color);
+    for (const auto& channel : kGBufferChannels)
+    {
+        pRenderContext->clearRtv(renderData.getTexture(channel.name)->getRTV().get(), float4(0.0f));
+    }
+    pRenderContext->clearUAV(pIds->getUAV().get(), uint4(kInvalidId));
 
-    if (!mpScene) return;
+    if (!mpScene)
+        return;
 
-    FALCOR_CHECK(mpScene->getMeshVao(),
+    FALCOR_CHECK(
+        mpScene->getMeshVao(),
         "RasterGBuffer: Scene does not provide a rasterizable mesh VAO.");
 
-     if (is_set(mpScene->getUpdates(), IScene::UpdateFlags::RecompileNeeded))
+    if (is_set(mpScene->getUpdates(), IScene::UpdateFlags::RecompileNeeded))
         resetPrograms();
 
     if (!mDepthPass.pProgram)
@@ -132,12 +141,18 @@ void RasterGBuffer::execute(RenderContext* pRenderContext, const RenderData& ren
     if (!mGBufferPass.pProgram)
         createProgram(mGBufferPass, kGBufferShader);
 
-    mDepthPass.pState->setFbo(mpDepthFbo);
-    mpScene->rasterize(pRenderContext, mDepthPass.pState.get(), mDepthPass.pVars.get(),
+    mDepthPass.pState->setFbo(mpGBufferFbo);
+    mpScene->rasterize(
+        pRenderContext,
+        mDepthPass.pState.get(),
+        mDepthPass.pVars.get(),
         RasterizerState::CullMode::Back);
 
     mGBufferPass.pState->setFbo(mpGBufferFbo);
-    mpScene->rasterize(pRenderContext, mGBufferPass.pState.get(), mGBufferPass.pVars.get(),
+    mpScene->rasterize(
+        pRenderContext,
+        mGBufferPass.pState.get(),
+        mGBufferPass.pVars.get(),
         RasterizerState::CullMode::Back);
 }
 

@@ -1,4 +1,5 @@
 #pragma once
+
 #include "Falcor.h"
 #include "RenderGraph/RenderPass.h"
 
@@ -7,7 +8,7 @@ using namespace Falcor;
 class RasterGBuffer : public RenderPass
 {
 public:
-    FALCOR_PLUGIN_CLASS(RasterGBuffer, "RasterGBuffer", "Raster GBuffer.");
+    FALCOR_PLUGIN_CLASS(RasterGBuffer, "RasterGBuffer", "Raster base pass writing a compact engine-style G-buffer.");
 
     static ref<RasterGBuffer> create(ref<Device> pDevice, const Properties& props)
     {
@@ -16,9 +17,9 @@ public:
 
     RasterGBuffer(ref<Device> pDevice, const Properties& props);
 
-    virtual RenderPassReflection reflect(const CompileData& compileData) override;
-    virtual void execute(RenderContext* pRenderContext, const RenderData& renderData) override;
-    virtual void setScene(RenderContext* pRenderContext, const ref<Scene>& pScene) override;
+    RenderPassReflection reflect(const CompileData& compileData) override;
+    void execute(RenderContext* pRenderContext, const RenderData& renderData) override;
+    void setScene(RenderContext* pRenderContext, const ref<Scene>& pScene) override;
     void onHotReload(HotReloadFlags reloaded) override;
 
 private:
@@ -33,7 +34,6 @@ private:
     void createProgram(RasterPipeline& pipeline, const std::string& shaderFile);
 
     ref<Scene> mpScene;
-    ref<Fbo> mpDepthFbo;
     ref<Fbo> mpGBufferFbo;
     RasterPipeline mDepthPass;
     RasterPipeline mGBufferPass;
